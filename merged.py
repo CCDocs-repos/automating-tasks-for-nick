@@ -9,6 +9,9 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 import pandas as pd
 import re
+import mysql.connector
+from mysql.connector import Error
+import logging
 
 load_dotenv()
 
@@ -38,6 +41,15 @@ SLACK_USERS = {
     # "nick": "U08UV8RB1K2"
 }
 
+# Database configuration
+DB_CONFIG = {
+    'host': os.getenv('DB_HOST', 'localhost'),
+    'database': os.getenv('DB_NAME', 'your_database_name'),
+    'user': os.getenv('DB_USER', 'your_username'),
+    'password': os.getenv('DB_PASSWORD', 'your_password'),
+    'port': int(os.getenv('DB_PORT', 3306))
+}
+
 # User mappings for Calendly/Zoom
 USER_MAPPINGS = {
     "sierra": {
@@ -64,6 +76,127 @@ credentials = service_account.Credentials.from_service_account_file(
 service = build("sheets", "v4", credentials=credentials)
 sheet = service.spreadsheets()
 
+# Global storage for all metrics
+daily_metrics = {}
+
+# --- DATABASE FUNCTIONS ---
+def get_db_connection():
+    """Create and return a database connection"""
+    try:
+        connection = mysql.connector.connect(**DB_CONFIG)
+        if connection.is_connected():
+            return connection
+    except Error as e:
+        print(f"Error connecting to MySQL: {e}")
+        return None
+
+def create_daily_metrics_table():
+    """Create the daily_metrics table if it doesn't exist"""
+    connection = get_db_connection()
+    if not connection:
+        return False
+    
+    try:
+        cursor = connection.cursor()
+        
+        create_table_query = """
+        CREATE TABLE IF NOT EXISTS daily_metrics (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            metric_date DATE NOT NULL,
+            representative ENUM('sierra','mikaela','mike') NOT NULL,
+            metric_name VARCHAR(100) NOT NULL,
+            metric_value DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+            metric_type ENUM('count','percentage','currency') NOT NULL DEFAULT 'count',
+            source VARCHAR(50) DEFAULT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            UNIQUE KEY unique_metric (metric_date, representative, metric_name)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+        """
+        
+        cursor.execute(create_table_query)
+        connection.commit()
+        print("✅ Daily metrics table created/verified")
+        return True
+        
+    except Error as e:
+        print(f"❌ Error creating daily metrics table: {e}")
+        return False
+    finally:
+        if connection.is_connected():
+            cursor.close()
+            connection.close()
+
+def insert_metric(metric_date, representative, metric_name, metric_value, metric_type='count', source=None):
+    """Insert or update a single metric"""
+    connection = get_db_connection()
+    if not connection:
+        return False
+    
+    try:
+        cursor = connection.cursor()
+        
+        query = """
+        INSERT INTO daily_metrics (metric_date, representative, metric_name, metric_value, metric_type, source)
+        VALUES (%s, %s, %s, %s, %s, %s)
+        ON DUPLICATE KEY UPDATE
+            metric_value = VALUES(metric_value),
+            metric_type = VALUES(metric_type),
+            source = VALUES(source),
+            updated_at = CURRENT_TIMESTAMP
+        """
+        
+        values = (metric_date, representative, metric_name, metric_value, metric_type, source)
+        cursor.execute(query, values)
+        connection.commit()
+        
+        return True
+        
+    except Error as e:
+        print(f"❌ Error inserting metric {metric_name} for {representative}: {e}")
+        return False
+    finally:
+        if connection.is_connected():
+            cursor.close()
+            connection.close()
+
+def save_all_metrics_to_db():
+    """Save all collected metrics to database"""
+    yesterday = (datetime.now(EST) - timedelta(days=1)).date()
+    
+    print(f"\n💾 Saving all metrics to database for {yesterday}...")
+    
+    total_saved = 0
+    for rep_name in ['sierra', 'mikaela', 'mike']:
+        rep_metrics = daily_metrics.get(rep_name, {})
+        
+        for metric_name, metric_data in rep_metrics.items():
+            success = insert_metric(
+                yesterday,
+                rep_name,
+                metric_name,
+                metric_data['value'],
+                metric_data['type'],
+                metric_data['source']
+            )
+            if success:
+                total_saved += 1
+                print(f"  ✅ {rep_name}: {metric_name} = {metric_data['value']} ({metric_data['type']})")
+            else:
+                print(f"  ❌ {rep_name}: Failed to save {metric_name}")
+    
+    print(f"\n✅ Total metrics saved: {total_saved}")
+
+def store_metric(representative, metric_name, value, metric_type='count', source=None):
+    """Store a metric in the global metrics dictionary"""
+    if representative not in daily_metrics:
+        daily_metrics[representative] = {}
+    
+    daily_metrics[representative][metric_name] = {
+        'value': float(value),
+        'type': metric_type,
+        'source': source
+    }
 
 # --- SLACK FUNCTIONS ---
 def send_slack_message(user_id, message):
@@ -156,6 +289,23 @@ def parse_numeric_value(value):
 
     try:
         return float(str_value)
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def parse_percentage_value(value):
+    """Parse percentage value and return float (without % sign)"""
+    if is_empty_or_null(value):
+        return 0.0
+
+    # Convert to string and clean up
+    str_value = str(value).strip()
+    
+    # Remove % sign if present
+    cleaned_value = str_value.replace("%", "").strip()
+
+    try:
+        return float(cleaned_value)
     except (ValueError, TypeError):
         return 0.0
 
@@ -255,19 +405,19 @@ def get_zoom_user_id_by_email(email, access_token):
 
 
 def get_zoom_meetings_for_user_today(user_id, email, access_token):
-    """Get Zoom RECORDINGS for a user for today in EST."""
-    # Get today's date in EST
+    """Get Zoom RECORDINGS for a user for yesterday in EST."""
+    # Get yesterday's date in EST
     now_est = datetime.now(EST)
-    today_est = now_est.date()
+    yesterday_est = (now_est - timedelta(days=1)).date()
 
     # Convert to UTC for API call (Zoom API expects UTC dates)
-    start_date_est = EST.localize(datetime.combine(today_est, time(0, 0, 0)))
-    end_date_est = EST.localize(datetime.combine(today_est, time(23, 59, 59)))
+    start_date_est = EST.localize(datetime.combine(yesterday_est, time(0, 0, 0)))
+    end_date_est = EST.localize(datetime.combine(yesterday_est, time(23, 59, 59)))
 
     start_date_utc = start_date_est.astimezone(pytz.UTC)
     end_date_utc = end_date_est.astimezone(pytz.UTC)
 
-    print(f"  Fetching Zoom recordings for {email} on {today_est} (EST)")
+    print(f"  Fetching Zoom recordings for {email} on {yesterday_est} (EST)")
     print(
         f"  UTC range: {start_date_utc.strftime('%Y-%m-%d')} to {end_date_utc.strftime('%Y-%m-%d')}"
     )
@@ -304,8 +454,8 @@ def get_zoom_meetings_for_user_today(user_id, email, access_token):
 
                     start_time_est = start_time_utc.astimezone(EST)
 
-                    # Check if meeting is today in EST
-                    if start_time_est.date() == today_est:
+                    # Check if meeting is yesterday in EST
+                    if start_time_est.date() == yesterday_est:
                         meeting_info = {
                             "id": meeting.get("uuid", meeting.get("id")),
                             "topic": meeting.get("topic"),
@@ -344,14 +494,14 @@ def format_event_time(iso_time_str):
 
 
 def get_calendly_events_for_user(user_uri, org_uri):
-    """Get today's Calendly events for a specific user."""
-    # Get today's date in EST
+    """Get yesterday's Calendly events for a specific user."""
+    # Get yesterday's date in EST
     now_est = datetime.now(EST)
-    today_est = now_est.date()
+    yesterday_est = (now_est - timedelta(days=1)).date()
 
     # Convert to UTC for API call
-    start_time_est = EST.localize(datetime.combine(today_est, time(0, 0, 0)))
-    end_time_est = EST.localize(datetime.combine(today_est, time(23, 59, 59)))
+    start_time_est = EST.localize(datetime.combine(yesterday_est, time(0, 0, 0)))
+    end_time_est = EST.localize(datetime.combine(yesterday_est, time(23, 59, 59)))
 
     start_time_utc = start_time_est.astimezone(pytz.UTC)
     end_time_utc = end_time_est.astimezone(pytz.UTC)
@@ -363,7 +513,6 @@ def get_calendly_events_for_user(user_uri, org_uri):
         "sort": "start_time:asc",
         "min_start_time": start_time_utc.isoformat(),
         "max_start_time": end_time_utc.isoformat(),
-        "status": "active",
     }
 
     events = []
@@ -373,18 +522,17 @@ def get_calendly_events_for_user(user_uri, org_uri):
         response.raise_for_status()
         data = response.json()
 
-        active_events = [
-            event
-            for event in data.get("collection", [])
-            if event.get("status") == "active"
-        ]
-        events.extend(active_events)
+        # Get all events (both active and canceled)
+        all_events = data.get("collection", [])
+        events.extend(all_events)
 
         url = data.get("pagination", {}).get("next_page")
         params = {}
 
     # Process events to extract relevant information
-    processed_events = []
+    active_events = []
+    canceled_events = []
+    
     for event in events:
         # Parse start time and convert to EST
         start_time_str = event.get("start_time")
@@ -400,9 +548,13 @@ def get_calendly_events_for_user(user_uri, org_uri):
                 "status": event.get("status"),
                 "uri": event.get("uri", ""),
             }
-            processed_events.append(event_info)
+            
+            if event.get("status") == "active":
+                active_events.append(event_info)
+            elif event.get("status") == "canceled":
+                canceled_events.append(event_info)
 
-    return processed_events
+    return active_events, canceled_events
 
 
 # --- MATCHING FUNCTIONS ---
@@ -650,11 +802,11 @@ def get_master_sheet_data():
 
 def calculate_running_close_rate():
     """
-    Re-compute each rep’s Running Close Rate (Sit→Sale) without ever
+    Re-compute each rep's Running Close Rate (Sit→Sale) without ever
     exceeding 100 %.
     - Relies on globals created elsewhere in the script:
-        • user_appointments_conducted  – today’s *conducted* sits per rep
-        • new_clients_counts           – today’s *non-organic* closes per rep
+        • user_appointments_conducted  – today's *conducted* sits per rep
+        • new_clients_counts           – today's *non-organic* closes per rep
     """
     master_data = get_master_sheet_data()
     if not master_data:
@@ -674,7 +826,7 @@ def calculate_running_close_rate():
     close_rates = {}
 
     for rep_key, aliases in name_map.items():
-        # locate this rep’s row in master_data (columns C & D)
+        # locate this rep's row in master_data (columns C & D)
         rep_row = None
         for alias in aliases:
             rep_row = next(
@@ -703,52 +855,12 @@ def calculate_running_close_rate():
 
         print(f"{rep_key.title()}: {total_closes}/{total_sits} → {rate:.1f}%")
 
+        # Store in metrics
+        store_metric(rep_key, "calculated_running_close_rate", rate, "percentage", "Master Sheet + Appointments")
+
     return close_rates
 
 
-def create_slack_message(
-    demo_by_data, all_users, sheet_name, metric_title, is_revenue=False
-):
-    """Create Slack message for a metric"""
-    if is_revenue:
-        complete_data = {
-            user: demo_by_data.get(user, 0.0) for user in all_users
-        }
-    else:
-        complete_data = {user: demo_by_data.get(user, 0) for user in all_users}
-
-    if not complete_data:
-        return f"✅ *{metric_title}*\nPeriod: {sheet_name}\n\nNo data found for this metric."
-
-    # Sort by value (highest first), then by name
-    sorted_data = sorted(complete_data.items(), key=lambda x: (-x[1], x[0]))
-
-    total_value = sum(complete_data.values())
-
-    message = f"""✅ *{metric_title}*
-Period: {sheet_name}
-
-*TEAM PERFORMANCE:*
-"""
-
-    for name, value in sorted_data:
-        display_name = name.strip() if name.strip() else "(Not Specified)"
-        if is_revenue:
-            message += (
-                f"• {display_name}: ${value:,.0f}\n"  # Changed from ₹ to $
-            )
-        else:
-            message += f"• {display_name}: {value}\n"
-
-    if is_revenue:
-        message += f"\n*TOTAL: ${total_value:,.0f}*"  # Changed from ₹ to $
-    else:
-        message += f"\n*TOTAL: {total_value}*"
-
-    return message
-
-
-# --- MESSAGE CREATION FUNCTIONS ---
 def create_slack_message(
     demo_by_data, all_users, sheet_name, metric_title, is_revenue=False
 ):
@@ -789,10 +901,159 @@ Period: {sheet_name}
     return message
 
 
+# --- MASTER SHEET ADDITIONAL METRICS ---
+def get_yesterday_sheet_name():
+    """Get the sheet name for yesterday's date"""
+    yesterday = (datetime.now(EST) - timedelta(days=1)).date()
+    return yesterday.strftime("%B %d").replace(" 0", " ")  # Remove leading zero from day
+
+def find_yesterday_sheet_in_master():
+    """Find yesterday's sheet in the master spreadsheet"""
+    try:
+        # Get all sheets information from master spreadsheet
+        spreadsheet_metadata = (
+            service.spreadsheets()
+            .get(spreadsheetId=MASTER_SHEET_ID, fields="sheets.properties")
+            .execute()
+        )
+        sheets = spreadsheet_metadata.get("sheets", [])
+        
+        yesterday_sheet_name = get_yesterday_sheet_name()
+        print(f"Looking for sheet: '{yesterday_sheet_name}'")
+        
+        # Look for exact match first
+        for sheet_info in sheets:
+            sheet_name = sheet_info["properties"]["title"]
+            if sheet_name == yesterday_sheet_name:
+                print(f"✅ Found exact match: '{sheet_name}'")
+                return sheet_name
+        
+        # Look for partial match (in case of different formatting)
+        yesterday_parts = yesterday_sheet_name.lower().split()
+        for sheet_info in sheets:
+            sheet_name = sheet_info["properties"]["title"]
+            sheet_parts = sheet_name.lower().split()
+            
+            # Check if month and day match
+            if len(yesterday_parts) >= 2 and len(sheet_parts) >= 2:
+                if yesterday_parts[0] in sheet_parts and yesterday_parts[1] in sheet_parts:
+                    print(f"✅ Found partial match: '{sheet_name}'")
+                    return sheet_name
+        
+        print(f"❌ Could not find sheet for {yesterday_sheet_name}")
+        print("Available sheets:")
+        for sheet_info in sheets:
+            print(f"  - {sheet_info['properties']['title']}")
+        
+        return None
+        
+    except Exception as e:
+        print(f"Error finding yesterday's sheet: {e}")
+        return None
+
+def get_master_sheet_additional_metrics():
+    """Get additional metrics from yesterday's sheet in the master spreadsheet"""
+    sheet_name = find_yesterday_sheet_in_master()
+    if not sheet_name:
+        print("Cannot get additional metrics without finding yesterday's sheet")
+        return False
+    
+    try:
+        print(f"\n📊 Fetching additional metrics from master sheet: '{sheet_name}'")
+        
+        # Fetch data from the sheet
+        sheet_range = f"'{sheet_name}'!A1:M10"  # Get enough rows and columns
+        result = (
+            sheet.values()
+            .get(spreadsheetId=MASTER_SHEET_ID, range=sheet_range)
+            .execute()
+        )
+        values = result.get("values", [])
+        
+        if not values:
+            print("No data found in the sheet")
+            return False
+        
+        # Process each representative row (skip header)
+        for row_idx in range(1, len(values)):
+            if row_idx >= len(values) or len(values[row_idx]) == 0:
+                continue
+                
+            row = values[row_idx]
+            if len(row) < 2:  # Need at least sales rep name
+                continue
+                
+            sales_rep = row[0].strip().lower() if row[0] else ""
+            
+            # Map sales rep names to our canonical names
+            rep_name = None
+            if "mikaela" in sales_rep:
+                rep_name = "mikaela"
+            elif "mike" in sales_rep or "hammer" in sales_rep:
+                rep_name = "mike"
+            elif "sierra" in sales_rep:
+                rep_name = "sierra"
+            elif "team total" in sales_rep.lower():
+                continue  # Skip team total row
+            
+            if not rep_name:
+                print(f"Skipping unknown rep: {sales_rep}")
+                continue
+            
+            print(f"\nProcessing additional metrics for {rep_name} ({sales_rep}):")
+            
+            # Extract additional metrics from master sheet (with safe indexing)
+            master_appointments_booked = parse_numeric_value(row[1] if len(row) > 1 else 0)
+            master_appointments_conducted = parse_numeric_value(row[2] if len(row) > 2 else 0)
+            master_new_clients_closed = parse_numeric_value(row[3] if len(row) > 3 else 0)
+            master_organic_clients_closed = parse_numeric_value(row[4] if len(row) > 4 else 0)
+            master_total_new_clients = parse_numeric_value(row[5] if len(row) > 5 else 0)
+            master_rebuy_clients = parse_numeric_value(row[6] if len(row) > 6 else 0)
+            master_show_rate = parse_percentage_value(row[7] if len(row) > 7 else 0)
+            master_running_close_rate = parse_percentage_value(row[8] if len(row) > 8 else 0)
+            master_new_client_revenue = parse_currency_value(row[9] if len(row) > 9 else 0)
+            master_rebuy_revenue = parse_currency_value(row[10] if len(row) > 10 else 0)
+            master_total_revenue = parse_currency_value(row[11] if len(row) > 11 else 0)
+            master_avg_deal_size = parse_currency_value(row[12] if len(row) > 12 else 0)
+            
+            # Calculate appointments canceled (booked - conducted, but ensure non-negative)
+            master_appointments_canceled = max(0, master_appointments_booked - master_appointments_conducted)
+            
+            # Store additional metrics with "master_" prefix to distinguish from calculated ones
+            store_metric(rep_name, "master_appointments_booked", master_appointments_booked, "count", "Master Sheet")
+            store_metric(rep_name, "master_appointments_conducted", master_appointments_conducted, "count", "Master Sheet")
+            store_metric(rep_name, "master_appointments_canceled", master_appointments_canceled, "count", "Master Sheet")
+            store_metric(rep_name, "master_show_rate", master_show_rate, "percentage", "Master Sheet")
+            store_metric(rep_name, "master_new_clients_closed", master_new_clients_closed, "count", "Master Sheet")
+            store_metric(rep_name, "master_organic_clients_closed", master_organic_clients_closed, "count", "Master Sheet")
+            store_metric(rep_name, "master_total_new_clients_closed", master_total_new_clients, "count", "Master Sheet")
+            store_metric(rep_name, "master_rebuy_clients", master_rebuy_clients, "count", "Master Sheet")
+            store_metric(rep_name, "master_running_close_rate", master_running_close_rate, "percentage", "Master Sheet")
+            store_metric(rep_name, "master_new_client_revenue", master_new_client_revenue, "currency", "Master Sheet")
+            store_metric(rep_name, "master_rebuy_revenue", master_rebuy_revenue, "currency", "Master Sheet")
+            store_metric(rep_name, "master_total_revenue", master_total_revenue, "currency", "Master Sheet")
+            store_metric(rep_name, "master_average_deal_size", master_avg_deal_size, "currency", "Master Sheet")
+            
+            print(f"  Master Appointments Booked: {master_appointments_booked}")
+            print(f"  Master Appointments Conducted: {master_appointments_conducted}")
+            print(f"  Master Show Rate: {master_show_rate}%")
+            print(f"  Master Running Close Rate: {master_running_close_rate}%")
+            print(f"  Master Total Revenue: ${master_total_revenue:,.2f}")
+        
+        return True
+        
+    except Exception as e:
+        print(f"Error fetching master sheet additional metrics: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+# --- MESSAGE CREATION FUNCTIONS ---
 def create_running_close_rate_message(close_rates):
     """Create Slack message for Running Close Rate metric"""
-    message = f"""✅ *RUNNING CLOSE RATE*
-Date: {datetime.now(EST).strftime('%Y-%m-%d')}
+    message = f"""✅ *RUNNING CLOSE RATE (CALCULATED)*
+Date: {(datetime.now(EST) - timedelta(days=1)).strftime('%Y-%m-%d')} (Yesterday)
 Source: Master Sheet + Appointments Data
 
 *TEAM PERFORMANCE:*
@@ -816,9 +1077,13 @@ Source: Master Sheet + Appointments Data
 
 
 def create_appointments_booked_message(user_results):
-    """Create Slack message for Total Appointments Booked metric"""
+    """Create Slack message for Total Appointments Booked metric (including canceled)"""
     total_booked = sum(
         result["scheduled_count"] for result in user_results.values()
+    )
+
+    total_canceled = sum(
+        result["canceled_count"] for result in user_results.values()
     )
 
     # Sort by booked count (highest first)
@@ -828,8 +1093,8 @@ def create_appointments_booked_message(user_results):
         reverse=True,
     )
 
-    message = f"""✅ *TOTAL APPOINTMENTS BOOKED*
-Date: {datetime.now(EST).strftime('%Y-%m-%d')}
+    message = f"""✅ *TOTAL APPOINTMENTS BOOKED (CALCULATED)*
+Date: {(datetime.now(EST) - timedelta(days=1)).strftime('%Y-%m-%d')} (Yesterday)
 Source: Calendly API
 
 *TEAM PERFORMANCE:*
@@ -837,10 +1102,19 @@ Source: Calendly API
 
     for name, result in sorted_users:
         count = result["scheduled_count"]
+        canceled = result["canceled_count"]
         display_name = name.title()
         message += f"• {display_name}: {count} appointments\n"
+        if canceled > 0:
+            message += f"  ↳ Canceled: {canceled}\n"
+
+        # Store calculated metrics
+        store_metric(name, "calculated_appointments_booked", count, "count", "Calendly")
+        store_metric(name, "calculated_appointments_canceled", canceled, "count", "Calendly")
 
     message += f"\n*TOTAL BOOKED: {total_booked}*"
+    if total_canceled > 0:
+        message += f"\n*TOTAL CANCELED: {total_canceled}*"
 
     return message
 
@@ -858,8 +1132,8 @@ def create_appointments_conducted_message(user_results):
         reverse=True,
     )
 
-    message = f"""✅ *TOTAL APPOINTMENTS CONDUCTED*
-Date: {datetime.now(EST).strftime('%Y-%m-%d')}
+    message = f"""✅ *TOTAL APPOINTMENTS CONDUCTED (CALCULATED)*
+Date: {(datetime.now(EST) - timedelta(days=1)).strftime('%Y-%m-%d')} (Yesterday)
 Source: Calendly + Zoom Recordings
 
 *TEAM PERFORMANCE:*
@@ -870,6 +1144,9 @@ Source: Calendly + Zoom Recordings
         display_name = name.title()
         message += f"• {display_name}: {count} appointments\n"
 
+        # Store calculated metrics
+        store_metric(name, "calculated_appointments_conducted", count, "count", "Calendly + Zoom")
+
     message += f"\n*TOTAL CONDUCTED: {total_conducted}*"
 
     return message
@@ -877,8 +1154,8 @@ Source: Calendly + Zoom Recordings
 
 def create_show_rate_message(user_results):
     """Create Slack message for Show Rate metric"""
-    message = f"""✅ *SHOW RATE*
-Date: {datetime.now(EST).strftime('%Y-%m-%d')}
+    message = f"""✅ *SHOW RATE (CALCULATED)*
+Date: {(datetime.now(EST) - timedelta(days=1)).strftime('%Y-%m-%d')} (Yesterday)
 Source: Calendly + Zoom Recordings
 
 *TEAM PERFORMANCE:*
@@ -897,6 +1174,9 @@ Source: Calendly + Zoom Recordings
         user_show_rates.append((name, show_rate, booked, conducted))
         total_booked_all += booked
         total_conducted_all += conducted
+
+        # Store calculated metrics
+        store_metric(name, "calculated_show_rate", show_rate, "percentage", "Calendly + Zoom")
 
     # Sort by show rate (highest first)
     user_show_rates.sort(key=lambda x: x[1], reverse=True)
@@ -922,8 +1202,8 @@ def calculate_average_deal_size():
     """
     Average Deal Size (NEW CLIENT sales only).
     Relies on:
-        • new_client_revenue_grouped – today’s $ per rep
-        • new_clients_counts        – today’s deal count per rep
+        • new_client_revenue_grouped – today's $ per rep
+        • new_clients_counts        – today's deal count per rep
         • MASTER_SHEET_ID           – cumulative sheet
     Returns {rep: avg $, ..., 'team_avg': $}
     """
@@ -949,7 +1229,7 @@ def calculate_average_deal_size():
         if name and name != "jason":
             cum_rev_deals[name] = (rev, deals)
 
-    # ---------- today’s dicts ----------
+    # ---------- today's dicts ----------
     today_rev = {
         norm(k): v
         for k, v in globals().get("new_client_revenue_grouped", {}).items()
@@ -958,7 +1238,7 @@ def calculate_average_deal_size():
         norm(k): v for k, v in globals().get("new_clients_counts", {}).items()
     }
 
-    # canonical rep keys we’ll return
+    # canonical rep keys we'll return
     canonical = {
         "sierra": ["sierra", "sierra campbell"],
         "mikaela": ["mikaela", "mikaela gordon"],
@@ -986,6 +1266,9 @@ def calculate_average_deal_size():
             f"{rep_key.title()}: ${total_rev:,.0f} / {total_deals} deals → ${avg_size:,.0f}"
         )
 
+        # Store in metrics
+        store_metric(rep_key, "calculated_average_deal_size", avg_size, "currency", "Master Sheet + Sales Data")
+
     # team-wide average
     if averages:
         averages["team_avg"] = sum(averages.values()) / len(averages)
@@ -996,17 +1279,6 @@ def calculate_average_deal_size():
 def create_deal_size_message(deal_size_dict):
     """
     Build a Slack-ready message summarizing Average Deal Size (new-client sales).
-
-    Parameters
-    ----------
-    deal_size_dict : dict
-        Output from `calculate_average_deal_size()`
-        e.g. {'sierra': 3500.0, 'mikaela': 4100.0, 'mike': 2800.0, 'team_avg': 3466.7}
-
-    Returns
-    -------
-    str
-        Formatted Slack message.
     """
     if not deal_size_dict:
         return "No deal-size data available."
@@ -1017,8 +1289,8 @@ def create_deal_size_message(deal_size_dict):
     # Sort reps by avg deal size, highest first
     sorted_reps = sorted(deal_size_dict.items(), key=lambda x: -x[1])
 
-    msg = f"""✅ *AVERAGE DEAL SIZE (NEW CLIENTS)*
-Date: {datetime.now(EST).strftime('%Y-%m-%d')}
+    msg = f"""✅ *AVERAGE DEAL SIZE (NEW CLIENTS) - CALCULATED*
+Date: {(datetime.now(EST) - timedelta(days=1)).strftime('%Y-%m-%d')} (Yesterday)
 Source: Master Sheet + Sales Data
 
 *TEAM PERFORMANCE:*
@@ -1036,13 +1308,60 @@ Source: Master Sheet + Sales Data
     return msg
 
 
+def create_metric_slack_message(metric_name, metric_display_name, metric_type="count"):
+    """Create a Slack message for a specific metric from master sheet"""
+    yesterday = (datetime.now(EST) - timedelta(days=1)).date()
+    
+    message = f"""✅ *{metric_display_name.upper()}*
+Date: {yesterday.strftime('%Y-%m-%d')} (Yesterday)
+Source: Master Sheet
+
+*TEAM PERFORMANCE:*
+"""
+    
+    # Collect data for all reps
+    rep_data = []
+    total_value = 0
+    
+    for rep_name in ['sierra', 'mikaela', 'mike']:
+        if rep_name in daily_metrics and metric_name in daily_metrics[rep_name]:
+            value = daily_metrics[rep_name][metric_name]['value']
+            rep_data.append((rep_name, value))
+            if metric_type != "percentage":  # Don't sum percentages
+                total_value += value
+    
+    # Sort by value (highest first)
+    rep_data.sort(key=lambda x: x[1], reverse=True)
+    
+    # Add individual rep data
+    for rep_name, value in rep_data:
+        display_name = rep_name.title()
+        if metric_type == "currency":
+            message += f"• {display_name}: ${value:,.0f}\n"
+        elif metric_type == "percentage":
+            message += f"• {display_name}: {value:.1f}%\n"
+        else:
+            message += f"• {display_name}: {int(value)}\n"
+    
+    # Add total if applicable
+    if metric_type == "currency" and total_value > 0:
+        message += f"\n*TOTAL: ${total_value:,.0f}*"
+    elif metric_type == "count" and total_value > 0:
+        message += f"\n*TOTAL: {int(total_value)}*"
+    elif metric_type == "percentage" and rep_data:
+        avg_value = sum(x[1] for x in rep_data) / len(rep_data)
+        message += f"\n*AVERAGE: {avg_value:.1f}%*"
+    
+    return message
+
+
 # --- MAIN EXECUTION FUNCTIONS ---
 def analyze_appointments():
     """Analyze appointments from Calendly and Zoom"""
     print("\n" + "=" * 80)
     print("PROCESSING APPOINTMENT DATA...")
     print(
-        f"Current time (EST): {datetime.now(EST).strftime('%Y-%m-%d %H:%M:%S %Z')}"
+        f"Processing data for: {(datetime.now(EST) - timedelta(days=1)).strftime('%Y-%m-%d')} (Yesterday)"
     )
     print("=" * 80)
 
@@ -1068,13 +1387,16 @@ def analyze_appointments():
             f"https://api.calendly.com/users/{mappings['calendly_uuid']}"
         )
         try:
-            calendly_events = get_calendly_events_for_user(user_uri, org_uri)
-            print(f"  Found {len(calendly_events)} Calendly events")
-            for event in calendly_events:
+            active_events, canceled_events = get_calendly_events_for_user(user_uri, org_uri)
+            all_calendly_events = active_events + canceled_events
+            print(f"  Found {len(active_events)} active Calendly events")
+            print(f"  Found {len(canceled_events)} canceled Calendly events")
+            for event in active_events:
                 print(f"    - {event['name']} at {event['start_time_str']}")
         except Exception as e:
             print(f"  Error fetching Calendly events for {name}: {e}")
-            calendly_events = []
+            active_events = []
+            canceled_events = []
 
         # Get Zoom recordings
         zoom_user_id = get_zoom_user_id_by_email(
@@ -1092,27 +1414,24 @@ def analyze_appointments():
 
         # Match events with recordings
         matched, unmatched = match_events_with_meetings(
-            calendly_events, zoom_meetings
+            active_events, zoom_meetings
         )
 
         # Store results
         all_results[name] = {
-            "calendly_events": calendly_events,
+            "calendly_events": active_events,
+            "canceled_events": canceled_events,
             "zoom_meetings": zoom_meetings,
             "matched_events": matched,
             "unmatched_events": unmatched,
-            "scheduled_count": len(calendly_events),
+            "scheduled_count": len(active_events),
+            "canceled_count": len(canceled_events),
             "conducted_count": len(matched),
         }
 
         print(
-            f"  Results: {len(matched)} conducted out of {len(calendly_events)} scheduled"
+            f"  Results: {len(matched)} conducted out of {len(active_events)} scheduled (active)"
         )
-
-    # Calculate total appointments conducted for running close rate
-    total_conducted = sum(
-        result["conducted_count"] for result in all_results.values()
-    )
 
     # Send appointment metrics to Slack
     if all_results:
@@ -1136,6 +1455,8 @@ def analyze_appointments():
                 name: result["conducted_count"]
                 for name, result in all_results.items()
             }
+            # Store globally for use in other functions
+            globals()["user_appointments_conducted"] = user_appointments_conducted
 
         close_rates = calculate_running_close_rate()
         if close_rates:
@@ -1167,14 +1488,14 @@ def analyze_sales_data():
 
         if not sheets:
             print("No sheets found in this spreadsheet.")
-            return
+            return {}
 
         # Get the latest sheet based on date parsing
         latest_sheet_info = get_latest_sheet(sheets)
 
         if not latest_sheet_info:
             print("Could not determine the latest sheet.")
-            return
+            return {}
 
         latest_sheet_title = latest_sheet_info["properties"]["title"]
 
@@ -1189,7 +1510,7 @@ def analyze_sales_data():
 
         if not values:
             print(f"No data found in sheet '{latest_sheet_title}'.")
-            return
+            return {}
 
         print(f"\nProcessing data from: '{latest_sheet_title}'")
 
@@ -1213,7 +1534,7 @@ def analyze_sales_data():
         if missing_columns:
             print(f"\n❌ Could not find matches for: {missing_columns}")
             print("Please check your column names and try again.")
-            return
+            return {}
 
         print(f"\n✅ All required columns found and mapped!")
 
@@ -1281,11 +1602,27 @@ def analyze_sales_data():
         else:
             new_clients_counts = {}
 
+        # Store metrics for each rep
+        for rep in ['sierra', 'mikaela', 'mike']:
+            # Map rep names to sheet names
+            rep_mapping = {
+                'sierra': ['sierra', 'sierra campbell', 'sierrac'],
+                'mikaela': ['mikaela', 'mikaela gordon'],
+                'mike': ['mike', 'mike hammer', 'hammer']
+            }
+            
+            # Find matching name in data
+            count = 0
+            for name_variant in rep_mapping.get(rep, [rep]):
+                count += new_clients_counts.get(name_variant, 0)
+            
+            store_metric(rep, "calculated_new_clients_closed", count, "count", "Google Sheets")
+
         slack_message = create_slack_message(
             new_clients_counts,
             all_users,
             latest_sheet_title,
-            "NEW CLIENTS CLOSED",
+            "NEW CLIENTS CLOSED (CALCULATED)",
         )
         broadcast_to_slack_users(slack_message)
 
@@ -1297,11 +1634,25 @@ def analyze_sales_data():
         else:
             organic_clients_counts = {}
 
+        # Store metrics for each rep
+        for rep in ['sierra', 'mikaela', 'mike']:
+            rep_mapping = {
+                'sierra': ['sierra', 'sierra campbell', 'sierrac'],
+                'mikaela': ['mikaela', 'mikaela gordon'],
+                'mike': ['mike', 'mike hammer', 'hammer']
+            }
+            
+            count = 0
+            for name_variant in rep_mapping.get(rep, [rep]):
+                count += organic_clients_counts.get(name_variant, 0)
+            
+            store_metric(rep, "calculated_organic_clients_closed", count, "count", "Google Sheets")
+
         slack_message = create_slack_message(
             organic_clients_counts,
             all_users,
             latest_sheet_title,
-            "NEW CLIENTS CLOSED (ORGANIC)",
+            "NEW CLIENTS CLOSED (ORGANIC) - CALCULATED",
         )
         broadcast_to_slack_users(slack_message)
 
@@ -1313,11 +1664,25 @@ def analyze_sales_data():
         else:
             rebuy_clients_counts = {}
 
+        # Store metrics for each rep
+        for rep in ['sierra', 'mikaela', 'mike']:
+            rep_mapping = {
+                'sierra': ['sierra', 'sierra campbell', 'sierrac'],
+                'mikaela': ['mikaela', 'mikaela gordon'],
+                'mike': ['mike', 'mike hammer', 'hammer']
+            }
+            
+            count = 0
+            for name_variant in rep_mapping.get(rep, [rep]):
+                count += rebuy_clients_counts.get(name_variant, 0)
+            
+            store_metric(rep, "calculated_rebuy_clients", count, "count", "Google Sheets")
+
         slack_message = create_slack_message(
             rebuy_clients_counts,
             all_users,
             latest_sheet_title,
-            "REBUY CLIENTS",
+            "REBUY CLIENTS (CALCULATED)",
         )
         broadcast_to_slack_users(slack_message)
 
@@ -1333,11 +1698,25 @@ def analyze_sales_data():
         else:
             new_client_revenue_grouped = {}
 
+        # Store metrics for each rep
+        for rep in ['sierra', 'mikaela', 'mike']:
+            rep_mapping = {
+                'sierra': ['sierra', 'sierra campbell', 'sierrac'],
+                'mikaela': ['mikaela', 'mikaela gordon'],
+                'mike': ['mike', 'mike hammer', 'hammer']
+            }
+            
+            revenue = 0.0
+            for name_variant in rep_mapping.get(rep, [rep]):
+                revenue += new_client_revenue_grouped.get(name_variant, 0.0)
+            
+            store_metric(rep, "calculated_new_client_revenue", revenue, "currency", "Google Sheets")
+
         slack_message = create_slack_message(
             new_client_revenue_grouped,
             all_users,
             latest_sheet_title,
-            "NEW CLIENT REVENUE",
+            "NEW CLIENT REVENUE (CALCULATED)",
             is_revenue=True,
         )
         broadcast_to_slack_users(slack_message)
@@ -1353,7 +1732,7 @@ def analyze_sales_data():
             total_new_clients,
             all_users,
             latest_sheet_title,
-            "TOTAL NEW CLIENTS CLOSED",
+            "TOTAL NEW CLIENTS CLOSED (CALCULATED)",
         )
         broadcast_to_slack_users(slack_message)
 
@@ -1367,11 +1746,25 @@ def analyze_sales_data():
         else:
             rebuy_revenue_grouped = {}
 
+        # Store metrics for each rep
+        for rep in ['sierra', 'mikaela', 'mike']:
+            rep_mapping = {
+                'sierra': ['sierra', 'sierra campbell', 'sierrac'],
+                'mikaela': ['mikaela', 'mikaela gordon'],
+                'mike': ['mike', 'mike hammer', 'hammer']
+            }
+            
+            revenue = 0.0
+            for name_variant in rep_mapping.get(rep, [rep]):
+                revenue += rebuy_revenue_grouped.get(name_variant, 0.0)
+            
+            store_metric(rep, "calculated_rebuy_revenue", revenue, "currency", "Google Sheets")
+
         slack_message = create_slack_message(
             rebuy_revenue_grouped,
             all_users,
             latest_sheet_title,
-            "REBUY REVENUE",
+            "REBUY REVENUE (CALCULATED)",
             is_revenue=True,
         )
         broadcast_to_slack_users(slack_message)
@@ -1383,27 +1776,79 @@ def analyze_sales_data():
             rebuy_revenue = rebuy_revenue_grouped.get(user, 0.0)
             total_revenue_dict[user] = new_revenue + rebuy_revenue
 
+        # Store metrics for each rep
+        for rep in ['sierra', 'mikaela', 'mike']:
+            rep_mapping = {
+                'sierra': ['sierra', 'sierra campbell', 'sierrac'],
+                'mikaela': ['mikaela', 'mikaela gordon'],
+                'mike': ['mike', 'mike hammer', 'hammer']
+            }
+            
+            total_revenue = 0.0
+            for name_variant in rep_mapping.get(rep, [rep]):
+                total_revenue += total_revenue_dict.get(name_variant, 0.0)
+            
+            store_metric(rep, "calculated_total_revenue", total_revenue, "currency", "Google Sheets")
+
         slack_message = create_slack_message(
             total_revenue_dict,
             all_users,
             latest_sheet_title,
-            "TOTAL REVENUE",
+            "TOTAL REVENUE (CALCULATED)",
             is_revenue=True,
         )
         broadcast_to_slack_users(slack_message)
 
+        # Store global variables for running close rate calculation
+        globals()["new_clients_counts"] = new_clients_counts
+        globals()["new_client_revenue_grouped"] = new_client_revenue_grouped
+
+        # Return processed data for database storage
+        return {
+            'new_clients_counts': new_clients_counts,
+            'organic_clients_counts': organic_clients_counts,
+            'rebuy_clients_counts': rebuy_clients_counts,
+            'new_client_revenue_grouped': new_client_revenue_grouped,
+            'rebuy_revenue_grouped': rebuy_revenue_grouped,
+            'sheet_name': latest_sheet_title
+        }
+
     except HttpError as err:
         print(f"An error occurred: {err}")
+        return {}
     except Exception as e:
         print(f"An unexpected error occurred: {e}")
         import traceback
-
         traceback.print_exc()
+        return {}
+
+
+def send_master_sheet_metric_messages():
+    """Send Slack messages for master sheet metrics"""
+    master_metrics_to_send = [
+        ("master_appointments_booked", "Total Appointments Booked (Master Sheet)", "count"),
+        ("master_appointments_conducted", "Total Appointments Conducted (Master Sheet)", "count"),
+        ("master_show_rate", "Show Rate (Master Sheet)", "percentage"),
+        ("master_new_clients_closed", "New Clients Closed (Master Sheet)", "count"),
+        ("master_organic_clients_closed", "New Clients Closed Organic (Master Sheet)", "count"),
+        ("master_total_new_clients_closed", "Total New Clients Closed (Master Sheet)", "count"),
+        ("master_rebuy_clients", "Rebuy Clients (Master Sheet)", "count"),
+        ("master_running_close_rate", "Running Close Rate (Master Sheet)", "percentage"),
+        ("master_new_client_revenue", "New Client Revenue (Master Sheet)", "currency"),
+        ("master_rebuy_revenue", "Rebuy Revenue (Master Sheet)", "currency"),
+        ("master_total_revenue", "Total Revenue (Master Sheet)", "currency"),
+        ("master_average_deal_size", "Average Deal Size (Master Sheet)", "currency"),
+    ]
+    
+    for metric_name, display_name, metric_type in master_metrics_to_send:
+        message = create_metric_slack_message(metric_name, display_name, metric_type)
+        broadcast_to_slack_users(message)
 
 
 def main():
     """Main function to run all analyses"""
     print("🚀 Starting comprehensive sales and appointment analysis...")
+    print(f"Processing data for: {(datetime.now(EST) - timedelta(days=1)).strftime('%Y-%m-%d')} (Yesterday)")
 
     # Check required environment variables
     required_vars = [
@@ -1412,6 +1857,7 @@ def main():
         ZOOM_CLIENT_ID,
         ZOOM_CLIENT_SECRET,
         SPREADSHEET_ID,
+        MASTER_SHEET_ID,
         SLACK_BOT_TOKEN,
     ]
 
@@ -1422,23 +1868,35 @@ def main():
         print("- User UUIDs: SIERRA_UUID, MIKAELA_UUID, MIKE_UUID")
         print("- ORG_UUID")
         print("- GOOGLE_SHEET_ID")
-        print("- MASTER_SHEET_ID (optional)")
+        print("- MASTER_SHEET_ID")
         print("- SLACK_BOT_TOKEN")
+        print("- DB_HOST, DB_NAME, DB_USER, DB_PASSWORD (for database)")
         return
 
     try:
-        # Analyze appointments (Calendly + Zoom) - This also calculates Running Close Rate
-        analyze_appointments()
+        # Create database table if it doesn't exist
+        create_daily_metrics_table()
 
-        # Analyze sales data (Google Sheets)
-        analyze_sales_data()
+        # Analyze appointments (Calendly + Zoom) - CALCULATED metrics
+        appointment_results = analyze_appointments()
 
-        print("\n✅ All analyses completed and messages sent to Slack!")
+        # Analyze sales data (Google Sheets) - CALCULATED metrics
+        sales_data = analyze_sales_data()
+
+        # Get additional metrics from master sheet - MASTER SHEET metrics
+        get_master_sheet_additional_metrics()
+
+        # Send master sheet metrics to Slack
+        send_master_sheet_metric_messages()
+
+        # Save all metrics to database
+        save_all_metrics_to_db()
+
+        print("\n✅ All analyses completed, messages sent to Slack, and data saved to database!")
 
     except Exception as e:
         print(f"Error during analysis: {e}")
         import traceback
-
         traceback.print_exc()
 
 
