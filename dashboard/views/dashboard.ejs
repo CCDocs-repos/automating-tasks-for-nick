@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title><%= appTitle %></title>
+    <link rel="icon" href="/avatar.jpg" type="image/jpeg">
+    <link rel="stylesheet" href="/css/style.css">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/moment@2.29.4/moment.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-moment@1.0.1/dist/chartjs-adapter-moment.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3.0.1/dist/chartjs-plugin-annotation.min.js"></script>
+    <script src="/js/chart-fix.js"></script>
+</head>
+<body>
+    <div class="dashboard-container">
+        <!-- Header -->
+        <header class="header">
+            <div class="header-content">
+                <h1 class="dashboard-title">
+                    <img src="/avatar.jpg" alt="Dashboard Icon" class="dashboard-icon">
+                    <%= appTitle %>
+                </h1>
+                <div class="header-controls">
+                    <div class="date-selector">
+                        <button id="prevDate" class="date-nav-btn">
+                            <i class="fas fa-chevron-left"></i>
+                        </button>
+                        <span id="currentDate" class="current-date"><%= moment(selectedDate).format('MMMM DD, YYYY') %></span>
+                        <button id="nextDate" class="date-nav-btn">
+                            <i class="fas fa-chevron-right"></i>
+                        </button>
+                    </div>
+                    <div class="theme-toggle">
+                        <button id="themeToggle" class="theme-toggle-btn">
+                            <i class="fas fa-moon"></i>
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </header>
+
+        <!-- Total Metrics Section -->
+        <section class="total-metrics-section">
+            <div class="metrics-grid total-grid">
+                <% totalMetrics.forEach(metric => { %>
+                <div class="metric-card total-metric">
+                    <div class="metric-header">
+                        <h4 class="metric-name">Total <%= metric.clean_metric_name.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase()) %></h4>
+                    </div>
+                    <div class="metric-value <%= metric.metric_type %>">
+                        <%= formatMetricValue(metric.total_value, metric.metric_type) %>
+                    </div>
+                    <div class="metric-type-badge <%= metric.metric_type %>">
+                        <% if (metric.metric_type === 'currency') { %>
+                            <i class="fas fa-dollar-sign"></i>
+                        <% } else if (metric.metric_type === 'percentage') { %>
+                            <i class="fas fa-percentage"></i>
+                        <% } else { %>
+                            <i class="fas fa-hashtag"></i>
+                        <% } %>
+                        <%= metric.metric_type %>
+                    </div>
+                </div>
+                <% }); %>
+            </div>
+        </section>
+
+        <!-- Charts Section -->
+        <section class="charts-section">
+            <div class="charts-grid">
+                <%
+                // Define the metrics we want to show charts for - both appointment and sales metrics
+                const chartMetricNames = ['appointments_conducted', 'average_deal_size'];
+
+                // Create charts for each specified metric
+                chartMetricNames.forEach(metricName => {
+                    const data = processedChartData[metricName];
+                    if (data) {
+                %>
+                <div class="chart-container">
+                    <div class="chart-header">
+                        <h3 class="chart-title"><%= metricName.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase()) %></h3>
+                    </div>
+                    <div class="chart-wrapper">
+                        <canvas id="chart-<%= metricName.replace(/[^a-zA-Z0-9]/g, '') %>" width="800" height="500"></canvas>
+                    </div>
+                </div>
+                <% } else { %>
+                <div class="chart-container">
+                    <div class="chart-header">
+                        <h3 class="chart-title"><%= metricName.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase()) %></h3>
+                    </div>
+                    <div class="chart-wrapper">
+                        <div class="no-data-message">
+                            <i class="fas fa-chart-line" style="font-size: 24px; margin-bottom: 10px; opacity: 0.5;"></i>
+                            <div>No data available for this metric</div>
+                        </div>
+                    </div>
+                </div>
+                <% } }); %>
+            </div>
+        </section>
+
+        <!-- Representatives Metrics -->
+        <section class="representatives-section">
+            <div class="representatives-grid">
+                <% Object.keys(representativeData).forEach(representative => { %>
+                <div class="rep-card">
+                    <div class="rep-header <%= representative %>">
+                        <div class="rep-avatar">
+                            <i class="fas fa-user"></i>
+                        </div>
+                        <h2 class="rep-name">
+                            <%= representative.charAt(0).toUpperCase() + representative.slice(1) %>
+                        </h2>
+                    </div>
+                    <div class="rep-metrics">
+                        <% Object.keys(representativeData[representative]).forEach(metricName => {
+                            const metric = representativeData[representative][metricName];
+                        %>
+                        <div class="rep-metric-item">
+                            <div class="rep-metric-info">
+                                <span class="rep-metric-name"><%= metricName.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase()) %></span>
+                                <span class="rep-metric-type <%= metric.metric_type %>">
+                                    <% if (metric.metric_type === 'currency') { %>
+                                        <i class="fas fa-dollar-sign"></i>
+                                    <% } else if (metric.metric_type === 'percentage') { %>
+                                        <i class="fas fa-percentage"></i>
+                                    <% } else { %>
+                                        <i class="fas fa-hashtag"></i>
+                                    <% } %>
+                                </span>
+                            </div>
+                            <div class="rep-metric-value <%= metric.metric_type %>">
+                                <%= formatMetricValue(metric.metric_value, metric.metric_type) %>
+                            </div>
+                        </div>
+                        <% }); %>
+                    </div>
+                </div>
+                <% }); %>
+            </div>
+        </section>
+
+        <!-- Footer -->
+        <footer class="footer">
+            <div class="footer-content">
+                <p>Last updated: <%= moment().format('MMMM DD, YYYY HH:mm:ss') %></p>
+            </div>
+        </footer>
+    </div>
+
+    <script src="/js/dashboard.js"></script>
+    <script>
+        // Initialize date selection
+        document.addEventListener('DOMContentLoaded', function() {
+            const currentDate = new Date('<%= selectedDate %>');
+            const prevDateBtn = document.getElementById('prevDate');
+            const nextDateBtn = document.getElementById('nextDate');
+
+            prevDateBtn.addEventListener('click', function() {
+                navigateDate(-1);
+            });
+
+            nextDateBtn.addEventListener('click', function() {
+                navigateDate(1);
+            });
+
+            function navigateDate(days) {
+                const newDate = new Date(currentDate);
+                newDate.setDate(newDate.getDate() + days);
+                window.location.href = `/?date=${moment(newDate).format('YYYY-MM-DD')}`;
+            }
+
+            // Theme toggle with proper chart updates
+            const themeToggle = document.getElementById('themeToggle');
+            const htmlElement = document.documentElement;
+
+            // Check for saved theme preference first
+            const savedTheme = localStorage.getItem('theme');
+            if (savedTheme) {
+                htmlElement.setAttribute('data-theme', savedTheme);
+                if (savedTheme === 'dark') {
+                    themeToggle.innerHTML = '<i class="fas fa-sun"></i>';
+                }
+            }
+
+            themeToggle.addEventListener('click', function() {
+                if (htmlElement.getAttribute('data-theme') === 'light') {
+                    htmlElement.setAttribute('data-theme', 'dark');
+                    themeToggle.innerHTML = '<i class="fas fa-sun"></i>';
+                    localStorage.setItem('theme', 'dark');
+                } else {
+                    htmlElement.setAttribute('data-theme', 'light');
+                    themeToggle.innerHTML = '<i class="fas fa-moon"></i>';
+                    localStorage.setItem('theme', 'light');
+                }
+            });
+        });
+
+        // Store chart data globally for chart manager
+        window.chartData = <%- JSON.stringify(processedChartData) %>;
+        window.selectedDate = '<%= selectedDate %>';
+
+        // Debug information
+        console.log('Dashboard loaded for date:', window.selectedDate);
+        console.log('Available chart data:', Object.keys(window.chartData || {}));
+
+        // Ensure charts are properly initialized after theme is set
+        document.addEventListener('DOMContentLoaded', function() {
+            // Small delay to ensure theme is applied
+            setTimeout(() => {
+                if (window.chartManager && !window.chartManager.isInitialized) {
+                    console.log('Manually triggering chart initialization...');
+                    window.chartManager.initializeCharts();
+                }
+            }, 200);
+        });
+    </script>
+</body>
+</html>
