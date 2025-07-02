@@ -167,9 +167,10 @@ function initializeCharts(chartData, animate = false) {
         if (container) {
           container.classList.add("chart-visible");
         }
-      }, index * 300);
-    }
-  });
+      }, index * 100);
+    });
+  }
+});
 }
 
 // Create individual chart
@@ -479,37 +480,15 @@ function getChartConfig(metricName, metricType, datasets, animate) {
               loop: false,
             },
             y: {
-              duration: 1500,
-              easing: "easeOutCubic",
-              delay: (ctx) => ctx.dataIndex * 100 + ctx.datasetIndex * 300,
-              from: (ctx) => {
-                // Start from the bottom of the chart
-                if (ctx.type === "data" && ctx.mode === "default") {
-                  return ctx.chart.scales.y.getPixelForValue(0);
-                }
-                return undefined;
-              },
+              duration: 600,
+              easing: "easeOutQuad",
+              delay: (ctx) => ctx.dataIndex * 20,
             },
             x: {
-              duration: 1000,
-              easing: "easeOutSine",
+              duration: 400,
+              easing: "easeOutQuad",
             },
-            onProgress: function (animation) {
-              try {
-                const chartInstance = animation.chart;
-                const ctx = chartInstance.ctx;
-                if (ctx) {
-                  ctx.save();
-                  ctx.shadowColor = "rgba(0, 0, 0, 0.15)";
-                  ctx.shadowBlur = 10;
-                  ctx.shadowOffsetX = 0;
-                  ctx.shadowOffsetY = 4;
-                  ctx.restore();
-                }
-              } catch (e) {
-                console.error("Animation error:", e);
-              }
-            },
+
           }
         : {
             duration: 0, // When animate is false, set duration to 0 instead of disabling animations completely
@@ -584,27 +563,25 @@ document.addEventListener("DOMContentLoaded", function () {
     });
   });
 
-  // Add hover effects to representative cards
+  // Add minimal hover effects to representative cards
   document.querySelectorAll(".rep-card").forEach((card) => {
     card.addEventListener("mouseenter", function () {
-      this.style.transform = "translateY(-8px)";
-      this.style.boxShadow = "var(--shadow-heavy)";
+      this.style.transform = "translateY(-2px)";
     });
 
     card.addEventListener("mouseleave", function () {
-      this.style.transform = "translateY(-5px)";
-      this.style.boxShadow = "var(--shadow-medium)";
+      this.style.transform = "translateY(0)";
     });
   });
 
-  // Add hover effects to total metric cards
+  // Add minimal hover effects to total metric cards
   document.querySelectorAll(".total-metric").forEach((card) => {
     card.addEventListener("mouseenter", function () {
-      this.style.transform = "translateY(-8px)";
+      this.style.transform = "translateY(-2px)";
     });
 
     card.addEventListener("mouseleave", function () {
-      this.style.transform = "translateY(-5px)";
+      this.style.transform = "translateY(0)";
     });
   });
 
@@ -795,48 +772,13 @@ function initializeDashboard() {
     updateChartsForTheme,
   };
 
-  // Apply smooth page transition and animations
-  document.body.classList.add("loaded");
-
-  // Add animation classes to chart containers
+  // Simple initialization without complex animations
   setTimeout(() => {
     const chartContainers = document.querySelectorAll(".chart-container");
-    chartContainers.forEach((container, index) => {
-      setTimeout(() => {
-        container.classList.add("chart-visible");
-      }, index * 200);
+    chartContainers.forEach((container) => {
+      container.classList.add("chart-visible");
     });
-
-    // Add pulse effect to representative cards
-    const repCards = document.querySelectorAll(".rep-card");
-    repCards.forEach((card, index) => {
-      setTimeout(
-        () => {
-          card.classList.add("rep-card-visible");
-
-          // Animate metric items sequentially
-          const metricItems = card.querySelectorAll(".rep-metric-item");
-          metricItems.forEach((item, itemIndex) => {
-            setTimeout(() => {
-              item.classList.add("metric-item-visible");
-            }, itemIndex * 100);
-          });
-        },
-        index * 300 + 500,
-      );
-    });
-
-    // Add shine effect to total metrics
-    const totalMetrics = document.querySelectorAll(".total-metric");
-    totalMetrics.forEach((metric, index) => {
-      setTimeout(
-        () => {
-          metric.classList.add("total-metric-visible");
-        },
-        index * 150 + 300,
-      );
-    });
-  }, 300);
+  }, 100);
 }
 
 // Initialize on DOM ready

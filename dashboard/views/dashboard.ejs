@@ -210,13 +210,13 @@
 
         // Ensure charts are properly initialized after theme is set
         document.addEventListener('DOMContentLoaded', function() {
-            // Small delay to ensure theme is applied
+            // Minimal delay to ensure theme is applied
             setTimeout(() => {
                 if (window.chartManager && !window.chartManager.isInitialized) {
                     console.log('Manually triggering chart initialization...');
                     window.chartManager.initializeCharts();
                 }
-            }, 200);
+            }, 50);
         });
     </script>
 </body>

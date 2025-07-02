@@ -290,9 +290,9 @@ class DashboardChartManager {
         maintainAspectRatio: false,
         animation: {
           animateRotate: true,
-          animateScale: true,
-          duration: 1500,
-          easing: "easeOutQuart",
+          animateScale: false,
+          duration: 800,
+          easing: "easeOutQuad",
         },
         layout: {
           padding: 20,
@@ -396,9 +396,9 @@ class DashboardChartManager {
         responsive: true,
         maintainAspectRatio: false,
         animation: {
-          duration: 1500,
-          easing: "easeOutQuart",
-          delay: (context) => context.dataIndex * 200,
+          duration: 600,
+          easing: "easeOutQuad",
+          delay: (context) => context.dataIndex * 50,
         },
         layout: {
           padding: {
@@ -536,11 +536,8 @@ class DashboardChartManager {
       // Apply theme-appropriate background
       container.style.backgroundColor = this.isDarkMode ? "#334155" : "#ffffff";
 
-      // Add success animation
-      container.classList.add("chart-success");
-      setTimeout(() => {
-        container.classList.remove("chart-success");
-      }, 600);
+      // Simple loaded state without animation
+      container.style.opacity = "1";
     }
   }
 
