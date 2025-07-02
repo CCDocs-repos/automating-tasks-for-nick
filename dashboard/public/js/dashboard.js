@@ -102,9 +102,9 @@ function updateChartColors(chart) {
 function initializeCharts(chartData, animate = false) {
   // Create charts for each metric
   const chartMetricNames = [
-    "appointments_booked",
-    "appointments_conducted",
-    "average_deal_size",
+      "appointments_booked",
+      "appointments_conducted",
+      "average_deal_size",
   ];
 
   // Create charts for each specified metric

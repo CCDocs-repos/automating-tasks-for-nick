@@ -31,6 +31,10 @@ class DashboardChartManager {
 
     // Chart type configurations
     this.chartConfigs = {
+      appointments_booked: {
+        type: "doughnut",
+        title: "Appointments Booked Distribution",
+      },
       appointments_conducted: {
         type: "doughnut",
         title: "Appointments Conducted Distribution",
@@ -114,9 +118,9 @@ class DashboardChartManager {
     document.querySelectorAll(".chart-container").forEach((container) => {
       container.style.backgroundColor = this.isDarkMode ? "#334155" : "#ffffff";
       // Force repaint to prevent color glitches
-      container.style.display = 'none';
+      container.style.display = "none";
       container.offsetHeight; // trigger reflow
-      container.style.display = 'flex';
+      container.style.display = "flex";
     });
 
     document.querySelectorAll(".chart-wrapper").forEach((wrapper) => {
@@ -128,9 +132,9 @@ class DashboardChartManager {
           "linear-gradient(135deg, rgba(255, 255, 255, 0.9) 0%, rgba(248, 250, 252, 0.8) 100%)";
       }
       // Force repaint to prevent color glitches
-      wrapper.style.display = 'none';
+      wrapper.style.display = "none";
       wrapper.offsetHeight; // trigger reflow
-      wrapper.style.display = 'flex';
+      wrapper.style.display = "flex";
     });
   }
 
@@ -156,6 +160,11 @@ class DashboardChartManager {
     Chart.defaults.font.size = 13;
     Chart.defaults.font.weight = "500";
     Chart.defaults.color = this.isDarkMode ? "#ffffff" : "#475569";
+    if (Chart.defaults.plugins && Chart.defaults.plugins.legend) {
+      Chart.defaults.plugins.legend.labels.color = this.isDarkMode
+        ? "#ffffff"
+        : "#475569";
+    }
     Chart.defaults.borderColor = this.isDarkMode
       ? "rgba(255, 255, 255, 0.1)"
       : "rgba(203, 213, 225, 0.3)";
@@ -165,15 +174,31 @@ class DashboardChartManager {
     Chart.defaults.elements.arc.borderWidth = 0;
     Chart.defaults.elements.bar.borderRadius = 8;
     Chart.defaults.elements.bar.borderSkipped = false;
+
+    // Force all text to be white in dark mode
+    if (this.isDarkMode) {
+      Chart.defaults.scales = Chart.defaults.scales || {};
+      Chart.defaults.scales.category = Chart.defaults.scales.category || {};
+      Chart.defaults.scales.category.ticks =
+        Chart.defaults.scales.category.ticks || {};
+      Chart.defaults.scales.category.ticks.color = "#ffffff";
+      Chart.defaults.scales.linear = Chart.defaults.scales.linear || {};
+      Chart.defaults.scales.linear.ticks =
+        Chart.defaults.scales.linear.ticks || {};
+      Chart.defaults.scales.linear.ticks.color = "#ffffff";
+    }
   }
 
   initializeCharts() {
     console.log("Initializing charts with data:", window.chartData);
 
     if (!window.chartData || Object.keys(window.chartData).length === 0) {
+      console.log("No chart data available, showing fallback message");
       this.showNoDataForAllCharts();
       return;
     }
+
+    console.log("Available chart data keys:", Object.keys(window.chartData));
 
     // Initialize each target metric chart
     Object.keys(this.chartConfigs).forEach((metricName) => {
@@ -255,7 +280,7 @@ class DashboardChartManager {
             hoverBackgroundColor: hoverColors,
             borderWidth: 0,
             hoverBorderWidth: 3,
-            hoverBorderColor: this.isDarkMode ? "#1e293b" : "#ffffff",
+            hoverBorderColor: this.isDarkMode ? "#ffffff" : "#1e293b",
             cutout: "60%",
           },
         ],
@@ -294,6 +319,8 @@ class DashboardChartManager {
                   pointStyle: "circle",
                   hidden: false,
                   index: i,
+                  fontColor: this.isDarkMode ? "#ffffff" : "#374151",
+                  color: this.isDarkMode ? "#ffffff" : "#374151",
                 }));
               },
             },
@@ -395,13 +422,17 @@ class DashboardChartManager {
               },
               padding: 10,
             },
+            title: {
+              color: this.isDarkMode ? "#ffffff" : "#64748b",
+              display: false,
+            },
           },
           y: {
             display: true,
             beginAtZero: true,
             grid: {
               color: this.isDarkMode
-                ? "rgba(71, 85, 105, 0.2)"
+                ? "rgba(255, 255, 255, 0.1)"
                 : "rgba(203, 213, 225, 0.3)",
               drawBorder: false,
             },
@@ -414,6 +445,10 @@ class DashboardChartManager {
               padding: 10,
               callback: (value) =>
                 this.formatValue(value, chartData.metricType),
+            },
+            title: {
+              color: this.isDarkMode ? "#ffffff" : "#64748b",
+              display: false,
             },
           },
         },
@@ -643,13 +678,13 @@ class DashboardChartManager {
           }
 
           // Force canvas reset to prevent color glitches
-          const ctx = canvas.getContext('2d');
+          const ctx = canvas.getContext("2d");
           ctx.clearRect(0, 0, canvas.width, canvas.height);
 
           // Force repaint
-          canvas.style.display = 'none';
+          canvas.style.display = "none";
           canvas.offsetHeight;
-          canvas.style.display = 'block';
+          canvas.style.display = "block";
 
           setTimeout(() => {
             this.createChart(canvas, metricName);

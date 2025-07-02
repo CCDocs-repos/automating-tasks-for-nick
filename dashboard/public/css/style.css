@@ -314,11 +314,11 @@ body.loaded {
 
 .charts-grid {
     display: grid;
-    grid-template-columns: repeat(2, 1fr);
+    grid-template-columns: repeat(3, 1fr);
     gap: var(--space-lg);
 }
 
-/* Large screens - 3 columns for 6 charts */
+/* Large screens - 3 columns for 3 charts */
 @media (max-width: 1200px) {
     .charts-grid {
         grid-template-columns: repeat(2, 1fr);
@@ -329,7 +329,7 @@ body.loaded {
     }
 }
 
-/* Extra large screens - optimize for 6 charts */
+/* Extra large screens - optimize for 3 charts */
 @media (min-width: 1400px) {
     .charts-grid {
         grid-template-columns: repeat(3, 1fr);
@@ -473,6 +473,16 @@ body.loaded {
     color: #ffffff !important;
 }
 
+/* Force chart canvas text to be white in dark mode */
+[data-theme="dark"] canvas {
+    color: #ffffff !important;
+}
+
+[data-theme="dark"] .chart-wrapper canvas * {
+    color: #ffffff !important;
+    fill: #ffffff !important;
+}
+
 .chart-visible .chart-wrapper {
     opacity: 1;
 }
@@ -519,12 +529,22 @@ body.loaded {
 /* Representatives Section */
 .representatives-section {
     margin-bottom: var(--space-xl);
+    min-height: 300px;
+    display: block !important;
+    visibility: visible !important;
+    position: relative;
+    z-index: 1;
+    background: transparent;
+    padding-top: var(--space-lg);
 }
 
 .representatives-grid {
-    display: grid;
+    display: grid !important;
     grid-template-columns: repeat(3, 1fr);
     gap: var(--space-lg);
+    min-height: 250px;
+    width: 100%;
+    visibility: visible !important;
 }
 
 .rep-card {
@@ -533,6 +553,18 @@ body.loaded {
     box-shadow: var(--shadow-light);
     overflow: hidden;
     transition: all var(--transition-normal);
+    min-height: 200px;
+    display: flex !important;
+    flex-direction: column;
+    visibility: visible !important;
+    opacity: 1 !important;
+    position: relative;
+}
+
+[data-theme="dark"] .rep-card {
+    background: var(--bg-card);
+    border: 1px solid rgba(99, 102, 241, 0.2);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
 }
 
 .rep-card:hover {

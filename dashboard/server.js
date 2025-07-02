@@ -154,7 +154,8 @@ app.get("/", async (req, res) => {
                     'calculated_new_client_revenue',
                     'calculated_rebuy_revenue',
                     'calculated_total_revenue'
-                ))
+                )) OR
+                metric_name = 'calculated_appointments_booked'
             )
             ORDER BY representative, clean_metric_name
         `,
@@ -185,6 +186,7 @@ app.get("/", async (req, res) => {
             WHERE metric_date = ?
             AND (
                 metric_name IN (
+                    'calculated_appointments_booked',
                     'calculated_appointments_conducted',
                     'calculated_average_deal_size'
                 )
@@ -259,7 +261,8 @@ app.get("/api/metrics", async (req, res) => {
                     'calculated_new_client_revenue',
                     'calculated_rebuy_revenue',
                     'calculated_total_revenue'
-                ))
+                )) OR
+                metric_name = 'calculated_appointments_booked'
             )
         `;
     let params = [selectedDate];
